@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Restauration - ZimaOS Docker Backup Manager</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="wrap">
+    <header class="topbar">
+      <div>
+        <h1>Restauration après crash</h1>
+        <p>Choisis une sauvegarde, les conteneurs à restaurer, puis lance la reconstruction.</p>
+      </div>
+      <div class="header-actions">
+        <a class="secondary link-button" href="{{ url_for('index') }}">← Sauvegarde</a>
+        <span class="badge {{ 'running' if running else 'ok' }}">{{ 'Opération en cours' if running else 'Prêt' }}</span>
+      </div>
+    </header>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    <section id="progress-card" class="card progress-card {% if not running %}hidden{% endif %}">
+      <div class="progress-header">
+        <div>
+          <div class="eyebrow">Opération en direct</div>
+          <h3 id="progress-phase">{{ progress.phase or 'Préparation' }}</h3>
+          <p id="progress-message">{{ progress.message or 'Initialisation…' }}</p>
+        </div>
+        <strong id="progress-percent">{{ progress.percent or 0 }}%</strong>
+      </div>
+      <div class="progress-track"><div id="progress-bar" class="progress-bar" style="width: {{ progress.percent or 0 }}%"></div></div>
+      <div id="progress-container" class="current-container {% if not progress.container %}hidden{% endif %}">
+        Conteneur : <strong>{{ progress.container or '' }}</strong>
+      </div>
+      <div class="live-messages">
+        <div class="small live-title">Dernières opérations</div>
+        <div id="progress-messages">
+          {% for m in progress.messages or [] %}<div>{{ m }}</div>{% endfor %}
+        </div>
+      </div>
+    </section>
+
+    <section class="card restore-select-card">
+      <div class="section-title">
+        <div>
+          <h3>1. Choisir la sauvegarde</h3>
+          <p class="muted summary-line">Destination : <code>{{ s.destination }}</code></p>
+        </div>
+      </div>
+      {% if snapshot_error %}
+        <div class="flash error">Impossible de lire les sauvegardes : {{ snapshot_error }}</div>
+      {% elif snapshots %}
+        <label>Sauvegarde disponible</label>
+        <select id="snapshot-select">
+          {% for snap in snapshots %}
+            <option value="{{ snap.name }}" {% if snap.name == selected_snapshot %}selected{% endif %}>
+              {{ snap.created_at.replace('T',' ') }} — {{ snap.container_count }} conteneur(s) — V{{ snap.version }}
+            </option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <div class="flash error">Aucune sauvegarde exploitable trouvée dans <code>{{ s.destination }}</code>.</div>
+      {% endif %}
+    </section>
+
+    {% if detail_error %}
+      <div class="flash error">{{ detail_error }}</div>
+    {% endif %}
+
+    {% if manifest and containers %}
+    <form id="restore-form" method="post" action="{{ url_for('restore_run') }}">
+      <input type="hidden" name="snapshot" value="{{ selected_snapshot }}">
+
+      <section class="card containers-card">
+        <div class="section-title container-title">
+          <div>
+            <h3>2. Conteneurs à restaurer</h3>
+            <p class="muted summary-line">
+              Sauvegarde du <strong>{{ manifest.created_at.replace('T',' ') if manifest.created_at else selected_snapshot }}</strong> ·
+              <strong id="restore-selected-count">{{ containers|length }}</strong> sélectionné(s)
+            </p>
+          </div>
+          <div class="mini-actions">
+            <button type="button" class="secondary compact" id="restore-select-all">Tout cocher</button>
+            <button type="button" class="secondary compact" id="restore-select-none">Tout décocher</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="container-table restore-table">
+            <thead>
+              <tr><th class="check-col">Restaurer</th><th>Conteneur</th><th>Image</th><th>Configuration sauvegardée</th><th>Compose</th></tr>
+            </thead>
+            <tbody>
+            {% for c in containers %}
+              <tr>
+                <td class="check-col"><input class="restore-check" type="checkbox" name="selected_containers" value="{{ c.name }}" checked></td>
+                <td>
+                  <strong>{{ c.name }}</strong>
+                  {% if c.aio_child %}<div class="small aio-note">Géré par Nextcloud AIO si le mastercontainer est sélectionné</div>{% endif %}
+                </td>
+                <td><code class="image-name">{{ c.image or '-' }}</code></td>
+                <td>
+                  {% if c.appdata_paths %}<span class="config-pill">{{ c.appdata_paths|length }} AppData</span>{% endif %}
+                  {% if c.named_volumes %}<span class="config-pill">{{ c.named_volumes|length }} volume(s)</span>{% endif %}
+                  {% if c.external_binds %}<span class="config-pill warning-pill">{{ c.external_binds|length }} montage(s) externe(s)</span>{% endif %}
+                  {% if not c.appdata_paths and not c.named_volumes %}<span class="small">Inventaire Docker uniquement</span>{% endif %}
+                  {% if c.external_binds %}
+                    <details><summary>Montages à retrouver avant reconstruction</summary>
+                      {% for m in c.external_binds %}<code class="path-line">{{ m.source }} → {{ m.destination }}</code>{% endfor %}
+                    </details>
+                  {% endif %}
+                </td>
+                <td><code class="path-line">{{ c.compose.compose_host_path or 'Non trouvé — inventaire Docker utilisé' }}</code></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card restore-actions-card">
+        <h3>3. Lancer la restauration</h3>
+        <div class="restore-explain-grid">
+          <div class="restore-option">
+            <h4>Restaurer les fichiers</h4>
+            <p>Remet AppData, les Compose ZimaOS et les volumes Docker. Les conteneurs existants ne sont pas recréés.</p>
+            <button class="secondary restore-button" name="action" value="files" {% if running %}disabled{% endif %}>Restaurer les fichiers</button>
+          </div>
+          <div class="restore-option recommended">
+            <div class="eyebrow">Après crash complet</div>
+            <h4>Restaurer + reconstruire</h4>
+            <p>Restaure les données puis recrée automatiquement les conteneurs, réseaux, ports, variables et mounts depuis l’inventaire Docker.</p>
+            <button class="primary restore-button" name="action" value="full" {% if running %}disabled{% endif %}>Restaurer + reconstruire</button>
+          </div>
+        </div>
+        <label class="confirm-box">
+          <input type="checkbox" name="confirm_restore">
+          <span>Je confirme que cette opération peut écraser la configuration existante des conteneurs sélectionnés.</span>
+        </label>
+        <div class="warning compact-warning">
+          <strong>Avant « Restaurer + reconstruire » :</strong> les disques, NAS et autres chemins externes doivent être remontés aux mêmes emplacements qu’au moment de la sauvegarde. L’outil bloque la reconstruction s’il détecte un montage <code>/media</code>, <code>/mnt</code> ou <code>/DATA</code> manquant.
+        </div>
+        {% if 'nextcloud-aio-mastercontainer' in (manifest.selected_containers or []) %}
+          <div class="warning compact-warning">
+            <strong>Nextcloud AIO :</strong> si son mastercontainer est sélectionné, ses conteneurs enfants ne sont pas recréés directement. Leurs données sont restaurées puis le mastercontainer reprend leur gestion.
+          </div>
+        {% endif %}
+      </section>
+    </form>
+    {% endif %}
+
+    <section class="card history restore-history">
+      <div class="section-title"><h3>Historique des restaurations</h3><span class="small">20 dernières exécutions</span></div>
+      {% if restores %}
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>État</th><th>Sauvegarde</th><th>Mode</th><th>Conteneurs</th><th>Détail</th></tr></thead>
+        <tbody>
+        {% for r in restores %}
+          <tr>
+            <td>{{ r.started_at.replace('T',' ') }}</td>
+            <td><span class="status {{ r.status }}">{{ {'success':'OK','error':'Erreur','running':'En cours'}.get(r.status,r.status) }}</span></td>
+            <td><code>{{ r.snapshot }}</code></td>
+            <td>{{ 'Reconstruction complète' if r.action == 'full' else 'Fichiers uniquement' }}</td>
+            <td>{{ (r.containers.split('\n')|length) if r.containers else 0 }}</td>
+            <td><a href="{{ url_for('show_restore_log', restore_id=r.id) }}">Journal</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      {% else %}<p class="muted">Aucune restauration effectuée.</p>{% endif %}
+    </section>
+  </main>
+
+<script>
+const snapshotSelect = document.getElementById('snapshot-select');
+snapshotSelect?.addEventListener('change', () => {
+  const u = new URL(window.location.href);
+  u.searchParams.set('snapshot', snapshotSelect.value);
+  window.location.href = u.toString();
+});
+
+const restoreChecks = [...document.querySelectorAll('.restore-check')];
+const restoreCount = document.getElementById('restore-selected-count');
+function updateRestoreCount(){ if (restoreCount) restoreCount.textContent = restoreChecks.filter(c => c.checked).length; }
+document.getElementById('restore-select-all')?.addEventListener('click', () => { restoreChecks.forEach(c => c.checked = true); updateRestoreCount(); });
+document.getElementById('restore-select-none')?.addEventListener('click', () => { restoreChecks.forEach(c => c.checked = false); updateRestoreCount(); });
+restoreChecks.forEach(c => c.addEventListener('change', updateRestoreCount));
+
+const progressCard = document.getElementById('progress-card');
+const progressBar = document.getElementById('progress-bar');
+const progressPercent = document.getElementById('progress-percent');
+const progressPhase = document.getElementById('progress-phase');
+const progressMessage = document.getElementById('progress-message');
+const progressContainer = document.getElementById('progress-container');
+const progressMessages = document.getElementById('progress-messages');
+let wasRunning = {{ 'true' if running else 'false' }};
+function escapeHtml(v){ return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderProgress(p, running) {
+  if (!p) return;
+  if (running || p.status === 'running') progressCard?.classList.remove('hidden');
+  const pct = Math.max(0, Math.min(100, Number(p.percent || 0)));
+  if (progressBar) progressBar.style.width = `${pct}%`;
+  if (progressPercent) progressPercent.textContent = `${pct}%`;
+  if (progressPhase) progressPhase.textContent = p.phase || 'Opération';
+  if (progressMessage) progressMessage.textContent = p.message || '';
+  if (progressContainer) {
+    if (p.container) { progressContainer.innerHTML = `Conteneur : <strong>${escapeHtml(p.container)}</strong>`; progressContainer.classList.remove('hidden'); }
+    else progressContainer.classList.add('hidden');
+  }
+  if (progressMessages) {
+    progressMessages.innerHTML = (Array.isArray(p.messages) ? p.messages.slice(-10) : []).map(m => `<div>${escapeHtml(m)}</div>`).join('');
+    progressMessages.scrollTop = progressMessages.scrollHeight;
+  }
+  progressCard?.classList.toggle('progress-error', p.status === 'error');
+  progressCard?.classList.toggle('progress-success', p.status === 'success');
+}
+async function pollStatus(){
+  try {
+    const r = await fetch('/api/status', {cache:'no-store'});
+    const s = await r.json();
+    renderProgress(s.progress, s.running);
+    if (s.running) wasRunning = true;
+    if (wasRunning && !s.running) { setTimeout(() => location.reload(), 1200); return; }
+  } catch (_) {}
+  setTimeout(pollStatus, 1000);
+}
+pollStatus();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Journal sauvegarde</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="wrap narrow">
+  <a class="back" href="{{ url_for('index') }}">← Retour</a>
+  <section class="card">
+    <h2>Sauvegarde #{{ backup.id }}</h2>
+    <p><strong>État :</strong> {{ backup.status }} · <strong>Snapshot :</strong> {{ backup.snapshot or '-' }}</p>
+    {% if backup.message %}<p>{{ backup.message }}</p>{% endif %}
+    <pre class="log">{{ text or 'Journal vide.' }}</pre>
+  </section>
+</main>
+</body>
+</html>

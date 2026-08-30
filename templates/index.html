@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZimaOS Docker Backup Manager</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="wrap">
+    <header class="topbar">
+      <div>
+        <h1>ZimaOS Docker Backup Manager</h1>
+        <p>Kit de reconstruction Docker : Compose + configurations + volumes + inventaire.</p>
+      </div>
+      <div class="header-actions"><a class="secondary link-button" href="{{ url_for('restore_page') }}">Restauration</a><span class="badge {{ 'running' if running else 'ok' }}">{{ 'Opération en cours' if running else 'Prêt' }}</span></div>
+    </header>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    <section id="progress-card" class="card progress-card {% if not running %}hidden{% endif %}">
+      <div class="progress-header">
+        <div>
+          <div class="eyebrow">Opération en direct</div>
+          <h3 id="progress-phase">{{ progress.phase or 'Préparation' }}</h3>
+          <p id="progress-message">{{ progress.message or 'Initialisation…' }}</p>
+        </div>
+        <strong id="progress-percent">{{ progress.percent or 0 }}%</strong>
+      </div>
+      <div class="progress-track" aria-label="Progression de la sauvegarde">
+        <div id="progress-bar" class="progress-bar" style="width: {{ progress.percent or 0 }}%"></div>
+      </div>
+      <div id="progress-container" class="current-container {% if not progress.container %}hidden{% endif %}">
+        Conteneur : <strong>{{ progress.container or '' }}</strong>
+      </div>
+      <div class="live-messages">
+        <div class="small live-title">Dernières opérations</div>
+        <div id="progress-messages">
+          {% for m in progress.messages or [] %}<div>{{ m }}</div>{% endfor %}
+        </div>
+      </div>
+    </section>
+
+    <form id="config-form" method="post" action="{{ url_for('settings_save') }}">
+      <section class="hero card">
+        <div>
+          <div class="eyebrow">Reconstruction après panne</div>
+          <h2>Choisis ce que tu veux pouvoir reconstruire</h2>
+          <p>La sauvegarde copie uniquement les conteneurs cochés, leurs configurations AppData et leurs volumes nommés.</p>
+        </div>
+        <button class="primary big" formaction="{{ url_for('backup_now') }}" {% if running %}disabled{% endif %}>Sauvegarder maintenant</button>
+      </section>
+
+      <div class="grid">
+        <section class="card">
+          <h3>Destination</h3>
+          <label>Chemin sur ZimaOS</label>
+          <input name="destination" value="{{ s.destination }}" placeholder="/media/zimaos-backup-docker">
+          <p class="hint">Destination prévue : <code>/media/zimaos-backup-docker</code>. Le gestionnaire vérifie que le disque/NAS est réellement monté avant d’écrire.</p>
+          <button class="secondary" formaction="{{ url_for('test_destination') }}">Tester la destination</button>
+        </section>
+
+        <section class="card">
+          <h3>Planification</h3>
+          <label class="toggle-row">
+            <input type="checkbox" name="schedule_enabled" {% if s.schedule_enabled == '1' %}checked{% endif %}>
+            <span>Activer la sauvegarde automatique</span>
+          </label>
+
+          <div class="row2">
+            <div>
+              <label>Fréquence</label>
+              <select name="frequency" id="frequency">
+                <option value="daily" {% if s.frequency == 'daily' %}selected{% endif %}>Tous les jours</option>
+                <option value="weekly" {% if s.frequency == 'weekly' %}selected{% endif %}>Chaque semaine</option>
+                <option value="monthly" {% if s.frequency == 'monthly' %}selected{% endif %}>Chaque mois (le 1er)</option>
+              </select>
+            </div>
+            <div>
+              <label>Heure</label>
+              <input type="time" name="time" value="{{ s.time }}">
+            </div>
+          </div>
+
+          <div id="weekday-row" class="{% if s.frequency != 'weekly' %}hidden{% endif %}">
+            <label>Jour</label>
+            <select name="weekday">
+              <option value="1" {% if s.weekday == '1' %}selected{% endif %}>Lundi</option>
+              <option value="2" {% if s.weekday == '2' %}selected{% endif %}>Mardi</option>
+              <option value="3" {% if s.weekday == '3' %}selected{% endif %}>Mercredi</option>
+              <option value="4" {% if s.weekday == '4' %}selected{% endif %}>Jeudi</option>
+              <option value="5" {% if s.weekday == '5' %}selected{% endif %}>Vendredi</option>
+              <option value="6" {% if s.weekday == '6' %}selected{% endif %}>Samedi</option>
+              <option value="0" {% if s.weekday == '0' %}selected{% endif %}>Dimanche</option>
+            </select>
+          </div>
+
+          <div class="cron-preview">Cron généré : <code>{{ cron }}</code></div>
+        </section>
+
+        <section class="card">
+          <h3>Sauvegarde</h3>
+          <label class="toggle-row">
+            <input type="checkbox" name="stop_containers" {% if s.stop_containers == '1' %}checked{% endif %}>
+            <span>Arrêter brièvement les conteneurs sélectionnés</span>
+          </label>
+          <p class="hint">Recommandé pour les bases SQLite/PostgreSQL. Seuls les conteneurs cochés sont arrêtés puis redémarrés.</p>
+
+          <label>Nombre de sauvegardes à conserver</label>
+          <input type="number" min="1" max="100" name="retention" value="{{ s.retention }}">
+        </section>
+
+        <section class="card">
+          <h3>Exclusions AppData</h3>
+          <label>Un motif rsync par ligne</label>
+          <textarea name="appdata_excludes" rows="7">{{ s.appdata_excludes }}</textarea>
+          <p class="hint">Ces exclusions s’appliquent seulement aux chemins AppData des conteneurs cochés.</p>
+        </section>
+      </div>
+
+      <section class="card containers-card">
+        <div class="section-title container-title">
+          <div>
+            <h3>Conteneurs à sauvegarder</h3>
+            <p class="muted summary-line">
+              <strong>{{ containers|length }}</strong> détecté(s) ·
+              <strong>{{ running_count }}</strong> actif(s) ·
+              <strong id="selected-count">{{ selected_count }}</strong> sélectionné(s)
+            </p>
+          </div>
+          <div class="mini-actions">
+            <button type="button" class="secondary compact" id="select-all">Tout cocher</button>
+            <button type="button" class="secondary compact" id="select-none">Tout décocher</button>
+          </div>
+        </div>
+
+        {% if docker_error %}
+          <div class="flash error">Impossible de lire Docker : {{ docker_error }}</div>
+        {% elif containers %}
+          <div class="table-wrap">
+            <table class="container-table">
+              <thead>
+                <tr>
+                  <th class="check-col">Sauver</th>
+                  <th>Conteneur</th>
+                  <th>État</th>
+                  <th>Image</th>
+                  <th>Stack / service</th>
+                  <th>Configuration détectée</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for c in containers %}
+                <tr>
+                  <td class="check-col">
+                    <input class="container-check" type="checkbox" name="selected_containers" value="{{ c.name }}" {% if c.selected %}checked{% endif %}>
+                  </td>
+                  <td>
+                    <strong>{{ c.name }}</strong>
+                    <div class="small">{{ 'Compose détecté' if c.compose else 'Inventaire Docker uniquement' }}</div>
+                  </td>
+                  <td><span class="status {{ 'success' if c.status == 'running' else 'idle' }}">{{ c.status }}</span></td>
+                  <td><code class="image-name">{{ c.image }}</code></td>
+                  <td>
+                    <div>{{ c.project }}</div>
+                    {% if c.service != '-' %}<div class="small">service : {{ c.service }}</div>{% endif %}
+                  </td>
+                  <td>
+                    {% if c.appdata %}
+                      <div class="config-pill">{{ c.appdata|length }} AppData</div>
+                    {% endif %}
+                    {% if c.volumes %}
+                      <div class="config-pill">{{ c.volumes|length }} volume(s)</div>
+                    {% endif %}
+                    {% if not c.appdata and not c.volumes %}
+                      <span class="small">Aucune config persistante détectée</span>
+                    {% endif %}
+                    {% if c.appdata %}
+                      <details><summary>Chemins AppData</summary>
+                        {% for p in c.appdata %}<code class="path-line">{{ p }}</code>{% endfor %}
+                      </details>
+                    {% endif %}
+                    {% if c.volumes %}
+                      <details><summary>Volumes</summary>
+                        {% for v in c.volumes %}<code class="path-line">{{ v }}</code>{% endfor %}
+                      </details>
+                    {% endif %}
+                    {% if c.external_binds %}
+                      <details><summary>{{ c.external_binds|length }} montage(s) externe(s) non copié(s)</summary>
+                        {% for p in c.external_binds %}<code class="path-line">{{ p }}</code>{% endfor %}
+                      </details>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="hint table-hint">Les montages externes (médias, téléchargements, NAS…) sont mémorisés dans l’inventaire pour la reconstruction mais ne sont pas copiés dans la sauvegarde.</p>
+        {% else %}
+          <p class="muted">Aucun conteneur Docker détecté.</p>
+        {% endif %}
+      </section>
+
+      <div class="actions double-actions">
+        <span class="muted">La sélection est utilisée aussi par les sauvegardes planifiées.</span>
+        <button class="primary">Enregistrer la configuration</button>
+      </div>
+    </form>
+
+    <section class="card history">
+      <div class="section-title history-title">
+        <div>
+          <h3>Historique</h3>
+          <span class="small">20 dernières exécutions</span>
+        </div>
+        {% if backups %}
+        <div class="mini-actions">
+          <button type="button" class="secondary compact" id="backup-select-all">Tout cocher</button>
+          <button type="button" class="secondary compact" id="backup-select-none">Tout décocher</button>
+        </div>
+        {% endif %}
+      </div>
+      {% if backups %}
+      <form method="post" action="{{ url_for('delete_backups') }}" id="delete-backups-form">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th class="check-col">Suppr.</th><th>Date</th><th>État</th><th>Snapshot</th><th>Taille</th><th>Détail</th></tr></thead>
+            <tbody>
+            {% for b in backups %}
+              <tr>
+                <td class="check-col">
+                  {% if b.snapshot and b.status != 'running' %}
+                  <input class="backup-delete-check" type="checkbox" name="snapshots" value="{{ b.snapshot }}">
+                  {% endif %}
+                </td>
+                <td>{{ b.started_at.replace('T',' ') }}</td>
+                <td><span class="status {{ b.status }}">{{ {'success':'OK','error':'Erreur','running':'En cours'}.get(b.status,b.status) }}</span></td>
+                <td><code>{{ b.snapshot or '-' }}</code></td>
+                <td>{{ b.size_bytes|size if b.size_bytes else '-' }}</td>
+                <td><a href="{{ url_for('show_log', backup_id=b.id) }}">Journal</a></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="delete-backups-bar">
+          <label class="confirm-box delete-confirm">
+            <input type="checkbox" name="confirm_delete" id="confirm-delete">
+            <span>Je confirme la suppression définitive des sauvegardes cochées.</span>
+          </label>
+          <button type="submit" class="danger" id="delete-backups-button" disabled>Supprimer la sélection</button>
+        </div>
+      </form>
+      {% else %}
+        <p class="muted">Aucune sauvegarde pour le moment.</p>
+      {% endif %}
+    </section>
+
+    <section class="warning">
+      <strong>Important :</strong> les sauvegardes peuvent contenir des mots de passe, tokens, clés API et autres secrets présents dans les variables Docker et AppData. Utilise un emplacement protégé.
+    </section>
+  </main>
+
+<script>
+const freq = document.getElementById('frequency');
+const week = document.getElementById('weekday-row');
+if (freq) freq.addEventListener('change', () => week.classList.toggle('hidden', freq.value !== 'weekly'));
+
+const checks = [...document.querySelectorAll('.container-check')];
+const count = document.getElementById('selected-count');
+function updateSelectedCount() {
+  if (count) count.textContent = checks.filter(c => c.checked).length;
+}
+document.getElementById('select-all')?.addEventListener('click', () => {
+  checks.forEach(c => c.checked = true);
+  updateSelectedCount();
+});
+document.getElementById('select-none')?.addEventListener('click', () => {
+  checks.forEach(c => c.checked = false);
+  updateSelectedCount();
+});
+checks.forEach(c => c.addEventListener('change', updateSelectedCount));
+
+const backupDeleteChecks = [...document.querySelectorAll('.backup-delete-check')];
+const confirmDelete = document.getElementById('confirm-delete');
+const deleteBackupsButton = document.getElementById('delete-backups-button');
+function updateDeleteButton() {
+  const anyChecked = backupDeleteChecks.some(c => c.checked);
+  if (deleteBackupsButton) deleteBackupsButton.disabled = !(anyChecked && confirmDelete?.checked);
+}
+document.getElementById('backup-select-all')?.addEventListener('click', () => {
+  backupDeleteChecks.forEach(c => c.checked = true);
+  updateDeleteButton();
+});
+document.getElementById('backup-select-none')?.addEventListener('click', () => {
+  backupDeleteChecks.forEach(c => c.checked = false);
+  updateDeleteButton();
+});
+backupDeleteChecks.forEach(c => c.addEventListener('change', updateDeleteButton));
+confirmDelete?.addEventListener('change', updateDeleteButton);
+document.getElementById('delete-backups-form')?.addEventListener('submit', (event) => {
+  const count = backupDeleteChecks.filter(c => c.checked).length;
+  if (!count || !confirmDelete?.checked || !window.confirm(`Supprimer définitivement ${count} sauvegarde(s) ?`)) {
+    event.preventDefault();
+  }
+});
+
+const progressCard = document.getElementById('progress-card');
+const progressBar = document.getElementById('progress-bar');
+const progressPercent = document.getElementById('progress-percent');
+const progressPhase = document.getElementById('progress-phase');
+const progressMessage = document.getElementById('progress-message');
+const progressContainer = document.getElementById('progress-container');
+const progressMessages = document.getElementById('progress-messages');
+let wasRunning = {{ 'true' if running else 'false' }};
+
+function renderProgress(p, running) {
+  if (!p) return;
+  if (running || p.status === 'running') progressCard?.classList.remove('hidden');
+  const pct = Math.max(0, Math.min(100, Number(p.percent || 0)));
+  if (progressBar) progressBar.style.width = `${pct}%`;
+  if (progressPercent) progressPercent.textContent = `${pct}%`;
+  if (progressPhase) progressPhase.textContent = p.phase || 'Sauvegarde';
+  if (progressMessage) progressMessage.textContent = p.message || '';
+  if (progressContainer) {
+    if (p.container) {
+      progressContainer.innerHTML = `Conteneur : <strong>${p.container}</strong>`;
+      progressContainer.classList.remove('hidden');
+    } else {
+      progressContainer.classList.add('hidden');
+    }
+  }
+  if (progressMessages) {
+    const msgs = Array.isArray(p.messages) ? p.messages.slice(-8) : [];
+    progressMessages.innerHTML = msgs.map(m => `<div>${String(m).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`).join('');
+    progressMessages.scrollTop = progressMessages.scrollHeight;
+  }
+  progressCard?.classList.toggle('progress-error', p.status === 'error');
+  progressCard?.classList.toggle('progress-success', p.status === 'success');
+}
+
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status', {cache: 'no-store'});
+    const s = await r.json();
+    renderProgress(s.progress, s.running);
+    if (s.running) wasRunning = true;
+    if (wasRunning && !s.running) {
+      setTimeout(() => location.reload(), 1200);
+      return;
+    }
+  } catch (_) {}
+  setTimeout(pollStatus, 1000);
+}
+pollStatus();
+</script>
+</body>
+</html>

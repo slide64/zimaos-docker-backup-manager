@@ -1,0 +1,3 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Journal restauration</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
+<body><main class="wrap narrow"><a class="back" href="{{ url_for('restore_page', snapshot=restore.snapshot) }}">← Retour aux restaurations</a><section class="card"><h2>Restauration {{ restore.snapshot }}</h2><p class="muted">{{ restore.started_at.replace('T',' ') }} · {{ 'Reconstruction complète' if restore.action == 'full' else 'Fichiers uniquement' }} · {{ restore.status }}</p><pre class="log">{{ text }}</pre></section></main></body></html>

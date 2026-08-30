@@ -1,0 +1,19 @@
+services:
+  zimaos-docker-backup-manager:
+    build: .
+    container_name: zimaos-docker-backup-manager
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-9877}:9876"
+    environment:
+      TZ: Europe/Paris
+      DOCKER_ROOT_DIR: ${DOCKER_ROOT_DIR:-/var/lib/docker}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /DATA/AppData:/host-appdata
+      - /var/lib/casaos/apps:/host-compose
+      - ${DOCKER_ROOT_DIR:-/var/lib/docker}:/host-docker-root
+      - /media:/host-media
+      - /mnt:/host-mnt
+      - /DATA:/host-data
+      - ./data:/data
